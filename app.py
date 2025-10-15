@@ -10,7 +10,6 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB
 FONT_FILE = os.path.join(os.path.dirname(__file__), "NotoSansDevanagari-Regular.ttf")
 LT_URL = os.environ.get("LT_URL", "https://libretranslate.com/translate")
 
-# Startup logging
 print("=" * 70)
 print("🚀 PDF Translator Server Starting...")
 print(f"🌐 Translation API: {LT_URL}")
@@ -41,7 +40,7 @@ def translate_texts(texts, target_lang="hi", source_lang="en"):
             if response.ok:
                 result = response.json().get("translatedText", text)
 
-                # Log first 3 translations to see what's happening
+                # Log first 3 translations
                 if idx < 3:
                     original_preview = text[:50] + "..." if len(text) > 50 else text
                     translated_preview = result[:50] + "..." if len(result) > 50 else result
@@ -58,6 +57,72 @@ def translate_texts(texts, target_lang="hi", source_lang="en"):
             translated.append(text)
 
     return translated
+
+
+def extract_text_blocks(page):
+    """Extract text blocks from a page using multiple methods."""
+    text_blocks = []
+
+    # Method 1: Try dict format (structured extraction)
+    try:
+        blocks_dict = page.get_text("dict")
+        for block in blocks_dict.get("blocks", []):
+            if block.get("type") == 0:  # Text block
+                for line in block.get("lines", []):
+                    line_text = ""
+                    line_bbox = line.get("bbox")
+                    for span in line.get("spans", []):
+                        line_text += span.get("text", "")
+
+                    if line_text.strip():
+                        text_blocks.append({
+                            "text": line_text.strip(),
+                            "bbox": line_bbox,
+                            "size": line.get("spans", [{}])[0].get("size", 12)
+                        })
+    except Exception as e:
+        print(f"   ⚠️  Dict extraction failed: {e}")
+
+    # Method 2: If dict fails, try blocks format
+    if not text_blocks:
+        try:
+            blocks = page.get_text("blocks")
+            for block in blocks:
+                # block format: (x0, y0, x1, y1, text, block_no, block_type)
+                if len(block) >= 5:
+                    text = block[4].strip()
+                    bbox = (block[0], block[1], block[2], block[3])
+                    if text:
+                        text_blocks.append({
+                            "text": text,
+                            "bbox": bbox,
+                            "size": 12  # default size
+                        })
+        except Exception as e:
+            print(f"   ⚠️  Blocks extraction failed: {e}")
+
+    # Method 3: Last resort - simple text extraction
+    if not text_blocks:
+        try:
+            simple_text = page.get_text("text")
+            if simple_text.strip():
+                # Split into lines
+                lines = [l.strip() for l in simple_text.split('\n') if l.strip()]
+                rect = page.rect
+                height_per_line = rect.height / max(len(lines), 1)
+
+                for idx, line in enumerate(lines):
+                    y0 = rect.y0 + (idx * height_per_line)
+                    y1 = y0 + height_per_line
+                    text_blocks.append({
+                        "text": line,
+                        "bbox": (rect.x0, y0, rect.x1, y1),
+                        "size": 12
+                    })
+        except Exception as e:
+            print(f"   ⚠️  Simple text extraction failed: {e}")
+
+    return text_blocks
 
 
 @app.route("/")
@@ -103,7 +168,7 @@ def translate_pdf():
         out_pdf = fitz.open()
 
         total_pages = len(src_pdf)
-        total_spans = 0
+        total_blocks = 0
 
         print(f"📖 Processing {total_pages} pages...")
 
@@ -111,49 +176,42 @@ def translate_pdf():
             src_page = src_pdf[page_num]
             rect = src_page.rect
 
+            # Create output page
             out_page = out_pdf.new_page(width=rect.width, height=rect.height)
             out_page.show_pdf_page(rect, src_pdf, page_num)
 
-            raw_dict = src_page.get_text("rawdict")
-            spans = []
+            # Extract text using enhanced method
+            text_blocks = extract_text_blocks(src_page)
 
-            for block in raw_dict.get("blocks", []):
-                for line in block.get("lines", []):
-                    for span in line.get("spans", []):
-                        text = (span.get("text") or "").strip()
-                        if text:
-                            bbox = span.get("bbox")
-                            size = span.get("size", 12)
-                            spans.append((bbox, text, size))
-
-            if not spans:
-                print(f"   Page {page_num + 1}: No text found (might be image-only)")
+            if not text_blocks:
+                print(f"   Page {page_num + 1}: ⚠️  No extractable text found")
                 continue
 
-            total_spans += len(spans)
-            print(f"   Page {page_num + 1}: Found {len(spans)} text elements")
+            total_blocks += len(text_blocks)
+            print(f"   Page {page_num + 1}: Found {len(text_blocks)} text blocks")
 
-            # Translate
-            texts = [span[1] for span in spans]
+            # Translate all text
+            texts = [block["text"] for block in text_blocks]
             translated_texts = translate_texts(
                 texts,
                 target_lang=target_lang,
                 source_lang=source_lang
             )
 
-            # Cover original text
-            for bbox, _, _ in spans:
-                rect_obj = fitz.Rect(bbox)
-                out_page.draw_rect(rect_obj, color=None, fill=(1, 1, 1), overlay=True)
-
-            # Insert translated text
+            # Cover original text and insert translations
             fontfile = FONT_FILE if os.path.exists(FONT_FILE) else None
 
-            if not fontfile and page_num == 0:
-                print(f"   ⚠️  Warning: Font file not found, using default font")
+            for idx, block in enumerate(text_blocks):
+                bbox = block["bbox"]
+                size = block.get("size", 12)
 
-            for idx, (bbox, _, size) in enumerate(spans):
+                # Create rectangle
                 rect_obj = fitz.Rect(bbox)
+
+                # Cover original text
+                out_page.draw_rect(rect_obj, color=None, fill=(1, 1, 1), overlay=True)
+
+                # Insert translated text
                 fontsize = max(8, min(int(size), 18))
 
                 leftover = out_page.insert_textbox(
@@ -166,6 +224,7 @@ def translate_pdf():
                     render_mode=0,
                 )
 
+                # Shrink if doesn't fit
                 while leftover and fontsize > 8:
                     fontsize -= 1
                     out_page.draw_rect(rect_obj, color=None, fill=(1, 1, 1), overlay=True)
@@ -189,7 +248,7 @@ def translate_pdf():
         output_size = len(out_bytes.getvalue())
 
         print(f"✅ SUCCESS!")
-        print(f"   Total text elements translated: {total_spans}")
+        print(f"   Total text blocks translated: {total_blocks}")
         print(f"   Output PDF size: {output_size // 1024}KB")
         print("=" * 70 + "\n")
 
