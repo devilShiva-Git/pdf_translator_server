@@ -24,26 +24,37 @@ print("=" * 70)
 def translate_text_mymemory(text, target_lang="hi", source_lang="en"):
     """Translate text using MyMemory API."""
     try:
-        # MyMemory uses ISO language codes
-        lang_pair = f"{source_lang}|{target_lang}"
-
+        # Convert language codes if needed
+        source_code = "en-GB" if source_lang == "en" else source_lang
+        target_code = "hi-IN" if target_lang == "hi" else target_lang
+        lang_pair = f"{source_code}|{target_code}"
+        
         params = {
-            "q": text[:500],  # MyMemory limit is 500 chars per request
-            "langpair": lang_pair
+            "q": text[:500],
+            "langpair": lang_pair,
+            "de": "your.email@example.com"  # Optional but helps avoid limits
         }
-
+        
+        print(f"   🔍 DEBUG: Translating '{text[:30]}...'")  # DEBUG
+        
         response = requests.get(MYMEMORY_URL, params=params, timeout=10)
-
+        
+        print(f"   🔍 DEBUG: Response status={response.status_code}")  # DEBUG
+        
         if response.ok:
             data = response.json()
+            print(f"   🔍 DEBUG: Response data={str(data)[:100]}...")  # DEBUG
+            
             if data.get("responseStatus") == 200:
-                return data.get("responseData", {}).get("translatedText", text)
-
+                translated = data.get("responseData", {}).get("translatedText", text)
+                print(f"   🔍 DEBUG: Translated='{translated[:30]}...'")  # DEBUG
+                return translated
+        
+        print(f"   ⚠️  Translation returned original text")
         return text
     except Exception as e:
-        print(f"   ⚠️  Translation error: {e}")
+        print(f"   ❌ Translation error: {e}")
         return text
-
 
 def translate_texts_batch(texts, target_lang="hi", source_lang="en"):
     """Translate a list of texts with rate limiting."""
